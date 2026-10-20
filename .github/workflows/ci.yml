@@ -39,3 +39,4 @@ jobs:
 
       - name: Test
         run: dotnet test aether-ledger.slnx -c Release --no-build
+        working-directory: aether-ledger
