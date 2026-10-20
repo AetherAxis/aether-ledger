@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 本仓 checkout 到仓名目录（跨仓 ProjectReference 解析到同级 <dep>/ 目录）
+      - uses: actions/checkout@v4
+        with:
+          path: aether-ledger
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      # GitHub Packages 私有源凭据（GITHUB_TOKEN 只写进 CI 运行时文件，不入库）。
+      # 依赖仓为私有仓时 GITHUB_TOKEN 默认不能跨仓读取——需在 org Settings → Actions →
+      # General 开放 accessible repositories，或改用 PAT secret。
+      - name: Configure GitHub Packages credentials
+        run: >
+          dotnet nuget update source github
+          --configfile aether-ledger/nuget.config
+          --username AetherAxis
+          --password ${{ secrets.GITHUB_TOKEN }}
+          --store-password-in-clear-text
+
+      - name: Build
+        run: dotnet build aether-ledger.slnx -c Release
+        working-directory: aether-ledger
+
+      - name: Test
+        run: dotnet test aether-ledger.slnx -c Release --no-build
