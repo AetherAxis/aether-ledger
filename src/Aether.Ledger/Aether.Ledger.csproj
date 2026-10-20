@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 虚拟币链引擎（2026-10-05 批1，最小设计落地）：账户模型 + Ed25519 签名转账 + 哈希链区块 +
+       五条验证规则 + 创世供给规则（treasury 拿满 21M）+ JSON-lines 链文件 + 独立验证器逻辑。
+       纯库零 ProjectReference——「链 = 资产层」独立于交易所（venue 层）存活的根基：
+       链文件 + 验证器 = 不需要任何活进程的余额真相。签名库刻意选 NSec（Ed25519 确定性签名）。 -->
+  <ItemGroup>
+    <PackageReference Include="NSec.Cryptography" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+</Project>

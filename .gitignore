@@ -1,0 +1,9 @@
+bin/
+obj/
+*.user
+.vs/
+.idea/
+*.log
+
+# macOS
+.DS_Store

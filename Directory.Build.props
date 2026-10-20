@@ -1,0 +1,6 @@
+<Project>
+  <!-- 独立仓库级共享属性（对齐 Aether monorepo 的项目属性约定：各项目自持 TFM/Nullable） -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+</Project>
