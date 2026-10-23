@@ -101,7 +101,40 @@ public static class LedgerChainFile
     /// 旧单资产链（缺 QuoteTotalSupplyAtoms/Asset 字段）在此明确拒绝——批 6 双资产是硬分叉。</summary>
     public static (LedgerGenesis Genesis, IReadOnlyList<LedgerBlock> Blocks) Read(string path)
     {
-        var lines = File.ReadAllLines(path).Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+        var (genesis, blocks, _) = ReadWithValidLength(path);
+        return (genesis, blocks);
+    }
+
+    /// <summary>
+    /// 读入链文件，并给出「最后一条完整记录的字节长度」。末行被截断（进程在 write 中途被杀 / 掉电）时
+    /// <c>ValidLength &lt; 文件长度</c>——调用方（<see cref="LedgerNode.Start"/>）应据此把文件截短再追加，
+    /// 否则半行会留在文件中间，**下一次**重启就变成无法容忍的中段损坏。
+    /// <para>末尾无换行的残行：能完整反序列化 ⇒ 视为完整（容忍手写/外部工具的末行无换行）；
+    /// 反序列化失败 ⇒ 视为截断丢弃。中间的坏行仍然抛（真损坏必须让人看见）。</para>
+    /// </summary>
+    public static (LedgerGenesis Genesis, IReadOnlyList<LedgerBlock> Blocks, long ValidLength) ReadWithValidLength(string path)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var lines = new List<string>();
+        var validLength = 0L;
+        var lineStart = 0;
+        for (var i = 0; i < bytes.Length; i++)
+        {
+            if (bytes[i] != (byte)'\n') continue;
+            var line = System.Text.Encoding.UTF8.GetString(bytes, lineStart, i - lineStart).TrimEnd('\r');
+            if (!string.IsNullOrWhiteSpace(line)) lines.Add(line);
+            lineStart = i + 1;
+            validLength = i + 1;
+        }
+        if (lineStart < bytes.Length)   // 末尾没有换行的残行
+        {
+            var tail = System.Text.Encoding.UTF8.GetString(bytes, lineStart, bytes.Length - lineStart).TrimEnd('\r');
+            if (!string.IsNullOrWhiteSpace(tail) && TryDeserializeBlock(tail))
+            {
+                lines.Add(tail);
+                validLength = bytes.Length;
+            }
+        }
         if (lines.Count == 0)
             throw new InvalidDataException($"链文件为空：{path}");
         LedgerGenesis genesis;
@@ -116,9 +149,17 @@ public static class LedgerChainFile
                 $"链文件为旧单资产协议（缺 QuoteTotalSupplyAtoms）——批 6 双资产为硬分叉。删除链文件后重启生成新链：{path}");
         }
         var blocks = new List<LedgerBlock>(lines.Count - 1);
-        foreach (var line in lines.Skip(1))
-            blocks.Add(JsonSerializer.Deserialize<LedgerBlock>(line)
-                ?? throw new InvalidDataException("区块行反序列化为 null。"));
-        return (genesis, blocks);
+        for (var i = 1; i < lines.Count; i++)
+        {
+            blocks.Add(JsonSerializer.Deserialize<LedgerBlock>(lines[i])
+                ?? throw new InvalidDataException($"第 {i + 1} 行区块反序列化为 null（链文件中段损坏）：{path}"));
+        }
+        return (genesis, blocks, validLength);
+    }
+
+    private static bool TryDeserializeBlock(string line)
+    {
+        try { return JsonSerializer.Deserialize<LedgerBlock>(line) is not null; }
+        catch (JsonException) { return false; }
     }
 }

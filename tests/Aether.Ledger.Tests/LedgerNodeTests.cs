@@ -8,6 +8,7 @@ internal sealed class LedgerNodeLoopback : IDisposable
     private readonly LedgerNode _node;
     private readonly string _chainFile;
     private readonly string? _producerSeed;
+    private bool _keepFiles;
 
     public LedgerClient Client { get; }
     /// <summary>实际监听端口（临时端口 0 = 内核分配——LedgerWalletToolTests 把它写进工具的节点地址 env）。</summary>
@@ -34,7 +35,9 @@ internal sealed class LedgerNodeLoopback : IDisposable
         var port = node.LocalEndpoint?.Port ?? throw new InvalidOperationException("节点未绑定端口");
         // 种子（生成的种子打印在日志里——测试从那里回收）
         var log = await File.ReadAllTextAsync(logFile);
-        var treasurySeed = ExtractSeed(log, "treasury");
+        // 种子必须回收成功，否则后续签名断言会以「空种子」这种难以定位的方式失败。
+        var treasurySeed = ExtractSeed(log, "treasury")
+            ?? throw new InvalidOperationException($"节点日志中未找到 treasury 种子：{logFile}");
         var producerSeed = ExtractSeed(log, "producer");
         return new LedgerNodeLoopback(node, new LedgerClient("127.0.0.1", port), chainFile, producerSeed)
         {
@@ -45,6 +48,42 @@ internal sealed class LedgerNodeLoopback : IDisposable
 
     /// <summary>生成链时日志里的 treasury 种子（hex）——测试直接用它签名转账。</summary>
     public string TreasurySeed { get; private init; } = "";
+
+    /// <summary>生成链时的 producer 种子（重启续链要用同一个——链文件只存公钥）。</summary>
+    public string ProducerSeed => _producerSeed ?? "";
+
+    /// <summary>节点已判定链文件落盘失败并停止出块。</summary>
+    public bool IsAppendFaulted => _node.IsAppendFaulted;
+
+    /// <summary>在**已有**链文件上起节点 = 生产重启路径：producer 种子经 <c>AETHER_LEDGER_PRODUCER_SEED</c> 提供
+    /// （env 是跨进程通道，这里同步设置/复位——Start() 在返回前同步完成，不留窗口）。
+    /// 不解析种子日志（已有链不再打印种子），<see cref="TreasurySeed"/> 为空是预期的。</summary>
+    public static LedgerNodeLoopback StartOnExisting(string chainFile, string producerSeed)
+    {
+        var previous = Environment.GetEnvironmentVariable("AETHER_LEDGER_PRODUCER_SEED");
+        Environment.SetEnvironmentVariable("AETHER_LEDGER_PRODUCER_SEED", producerSeed);
+        try
+        {
+            var node = new LedgerNode(new LedgerNodeOptions("127.0.0.1", 0, chainFile, 77, 60), chainFile + ".log");
+            node.Start();
+            var port = node.LocalEndpoint?.Port ?? throw new InvalidOperationException("节点未绑定端口");
+            return new LedgerNodeLoopback(node, new LedgerClient("127.0.0.1", port), chainFile, producerSeed)
+            {
+                Port = port,
+            };
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AETHER_LEDGER_PRODUCER_SEED", previous);
+        }
+    }
+
+    /// <summary>停止节点但**保留**链文件/日志（重启恢复测试要在同一文件上再起一个节点）。</summary>
+    public void StopKeepFiles()
+    {
+        _keepFiles = true;
+        try { _node.StopAsync().GetAwaiter().GetResult(); } catch { }
+    }
 
     private static string? ExtractSeed(string log, string label)
     {
@@ -57,6 +96,7 @@ internal sealed class LedgerNodeLoopback : IDisposable
     {
         try { _node.StopAsync().GetAwaiter().GetResult(); } catch { }
         try { _node.Dispose(); } catch { }
+        if (_keepFiles) return;
         try { File.Delete(_chainFile); } catch { }
         try { File.Delete(_chainFile + ".log"); } catch { }
     }
@@ -66,11 +106,10 @@ internal sealed class LedgerNodeLoopback : IDisposable
 /// 批 2 节点验收：RPC 面（getInfo/getBalance/submitTx/getBlock/getTx/exportChain）+
 /// 出块循环（有交易出块 + 心跳）+ 链文件持久化（逐块 append、重启 = 全量重放恢复、独立验证器复核）。
 /// </summary>
-public class LedgerNodeTests : IDisposable
+public class LedgerNodeTests
 {
-    private readonly LedgerNodeLoopback _sim = null!;   // 每测试方法新建（xunit 实例隔离）——见各测试内
-    public void Dispose() { }
-
+    // 每个测试方法各自 `using var sim = await NewSimAsync(...)`：xunit 每个方法一个类实例，
+    // 不需要再留一个从未使用的字段。
     private static async Task<LedgerNodeLoopback> NewSimAsync(string label)
         => await LedgerNodeLoopback.StartNewAsync(label);
 
@@ -130,27 +169,94 @@ public class LedgerNodeTests : IDisposable
     }
 
     [Fact]
-    public async Task 链文件逐块落盘_独立验证器复核_重启恢复()
+    public async Task 重启恢复_同链文件再起节点_身份高度余额复原且能续块()
     {
-        using var sim = await NewSimAsync("persist");
+        var sim = await NewSimAsync("persist");
+        // ① 出块后独立复核（先不信节点：验证器只读链文件）
         var treasury = new LedgerWallet(Convert.FromHexString(sim.TreasurySeed));
         var alice = LedgerHarness.Wallet("node-restart");
         var tx = LedgerTransaction.Sign(77, treasury, alice.Address, 250_000_000UL, 1);
         await sim.Client.SubmitTxAsync(tx);
         await WaitForAsync(async () => (await sim.Client.GetInfoAsync()).Height >= 1);
 
-        // ① 独立验证器复核链文件（不需要节点活着——先停节点再验）
-        var chainFile = sim.ChainFile;
-        var verify = LedgerVerifier.VerifyFile(chainFile);
+        var verify = LedgerVerifier.VerifyFile(sim.ChainFile);
         Assert.True(verify.Ok, verify.Error);
         Assert.Equal(250_000_000UL, verify.Accounts[alice.Address.Hex].BalanceAtoms);
-
-        // ② 停节点 → 同链文件再起节点（producer 种子经 env）→ 状态恢复
-        var producerSeed = ExtractProducerSeed(sim);
-        sim.Dispose();   // 停 + 删临时文件？——夹具 Dispose 会删链文件。改为读后手动重建：
-        // 注：夹具删除链文件对本测试不适用——直接用验证器复核（①）+ 节点内恢复语义由「全量重放」保证（引擎测试已覆盖）。
         Assert.True(verify.SupplyConserved);
-        await Task.CompletedTask;
+
+        var infoBefore = await sim.Client.GetInfoAsync();
+        var chainFile = sim.ChainFile;
+        var producerSeed = sim.ProducerSeed;
+        sim.StopKeepFiles();   // 停服但保留链文件 = 进程被杀后磁盘上留下的东西
+
+        // ② 同链文件再起节点（producer 种子经 env——生产重启的既定通道，测它而不是绕开它）
+        using var node2 = LedgerNodeLoopback.StartOnExisting(chainFile, producerSeed);
+        var infoAfter = await node2.Client.GetInfoAsync();
+        Assert.Equal(infoBefore.GenesisHash, infoAfter.GenesisHash);    // 链身份跨重启不变
+        Assert.Equal(infoBefore.Height, infoAfter.Height);              // 全量重放恢复高度
+        Assert.Equal(250_000_000UL, (await node2.Client.GetBalanceAsync(alice.Address.Hex)).BalanceAtoms);
+        var (height, found) = await node2.Client.GetTxAsync(tx.Hash);
+        Assert.Equal(1UL, height);                                      // 交易索引在重放时重建
+        Assert.Equal(tx.Hash, found.Hash);
+
+        // ③ 续块：producer 私钥来自种子，新块签名必须被验证器接受（treasury nonce 已推进到 1 ⇒ 下笔用 2）
+        var bob = LedgerHarness.Wallet("node-restart-bob");
+        await node2.Client.SubmitTxAsync(LedgerTransaction.Sign(77, treasury, bob.Address, 1_000_000UL, 2));
+        await WaitForAsync(async () => (await node2.Client.GetInfoAsync()).Height >= 2);
+        var verify2 = LedgerVerifier.VerifyFile(chainFile);
+        Assert.True(verify2.Ok, verify2.Error);                        // 重启前 1 块 + 重启后 1 块同链可验
+        Assert.Equal(2UL, verify2.BlocksProcessed);
+    }
+
+    [Fact]
+    public async Task 末行被截断_重放丢弃半行并截短文件_之后仍可续块()
+    {
+        var sim = await NewSimAsync("truncated-tail");
+        var treasury = new LedgerWallet(Convert.FromHexString(sim.TreasurySeed));
+        var alice = LedgerHarness.Wallet("node-truncated");
+        await sim.Client.SubmitTxAsync(LedgerTransaction.Sign(77, treasury, alice.Address, 10_000_000UL, 1));
+        await WaitForAsync(async () => (await sim.Client.GetInfoAsync()).Height >= 1);
+
+        var chainFile = sim.ChainFile;
+        var producerSeed = sim.ProducerSeed;
+        sim.StopKeepFiles();
+        // 模拟「进程在 write 中途被杀」：文件尾多出半行合法 JSON 前缀（无换行）
+        File.AppendAllText(chainFile, "{\"chainId\":77,\"height\":2,\"prev");
+        var lengthBefore = new FileInfo(chainFile).Length;
+
+        using var node2 = LedgerNodeLoopback.StartOnExisting(chainFile, producerSeed);
+        Assert.Equal(1UL, (await node2.Client.GetInfoAsync()).Height);       // 半行被丢弃，已确认块仍在
+        Assert.True(new FileInfo(chainFile).Length < lengthBefore);           // 半行被截掉（不是留在文件里）
+        // 续块后整条链仍可被独立验证（半行没变成中段损坏）
+        await node2.Client.SubmitTxAsync(LedgerTransaction.Sign(77, treasury, alice.Address, 1_000_000UL, 2));
+        await WaitForAsync(async () => (await node2.Client.GetInfoAsync()).Height >= 2);
+        var verify = LedgerVerifier.VerifyFile(chainFile);
+        Assert.True(verify.Ok, verify.Error);
+        Assert.Equal(2UL, verify.BlocksProcessed);
+    }
+
+    [Fact]
+    public async Task 链文件不可写_停止出块_内存态不前进()
+    {
+        if (OperatingSystem.IsWindows()) return;   // 用 POSIX 权限位制造落盘失败
+        var sim = await NewSimAsync("append-fault");
+        var treasury = new LedgerWallet(Convert.FromHexString(sim.TreasurySeed));
+        var alice = LedgerHarness.Wallet("node-fault");
+        File.SetUnixFileMode(sim.ChainFile, UnixFileMode.UserRead);   // 只读 ⇒ 下一次 append 必失败
+        try
+        {
+            await sim.Client.SubmitTxAsync(LedgerTransaction.Sign(77, treasury, alice.Address, 1_000_000UL, 1));
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (!sim.IsAppendFaulted && sw.ElapsedMilliseconds < 5000) await Task.Delay(50);
+
+            Assert.True(sim.IsAppendFaulted);                          // 落盘失败被识别（不是只记日志继续跑）
+            Assert.Equal(0UL, (await sim.Client.GetInfoAsync()).Height);   // 内存态不前进（重启不会「丢」块）
+            Assert.Single(File.ReadAllLines(sim.ChainFile));           // 文件里只有创世——无半块
+        }
+        finally
+        {
+            File.SetUnixFileMode(sim.ChainFile, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
     }
 
     [Fact]
@@ -176,10 +282,4 @@ public class LedgerNodeTests : IDisposable
         }
         Assert.Fail("等待超时（出块循环未在预期时间内完成）");
     }
-
-    private static string ExtractProducerSeed(LedgerNodeLoopback sim)
-        => File.ReadAllText(sim.ChainFile + ".log") is { } log
-           && System.Text.RegularExpressions.Regex.Match(log, @"⚠ producer 种子（hex[^：]*）：([0-9a-f]{64})") is { Success: true } m
-        ? m.Groups[1].Value
-        : throw new InvalidOperationException("producer 种子未找到（日志）");
 }

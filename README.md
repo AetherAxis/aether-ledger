@@ -8,7 +8,7 @@
 | 项目 | 说明 |
 |---|---|
 | `src/Aether.Ledger` | 链引擎纯库：账户/转账签名/区块/五条验证规则/创世供给/JSON-lines 链文件/节点（TCP JSON-RPC + 内存池 + 出块循环）/桥（交易所托管服务）。唯一依赖 `NSec.Cryptography`（Ed25519 确定性签名） |
-| `tests/Aether.Ledger.Tests` | 纯链测试（引擎规则 + 节点回环），22 例 |
+| `tests/Aether.Ledger.Tests` | 纯链测试（引擎规则 + 节点回环 + 重启恢复/末行截断自愈/落盘失败停写），24 例 |
 | `doc/ledger-runbook.md` | 运维手册（部署/验证/备份种子/发币/充值/交易/提币） |
 
 节点/验证器宿主（原 `apps/LedgerNode`、`apps/LedgerVerify`）已移至 aether-apps 仓（组合根归一，2026-10-20）。

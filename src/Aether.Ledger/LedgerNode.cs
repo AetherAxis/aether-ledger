@@ -52,6 +52,14 @@ public sealed class LedgerNode : IDisposable
     private readonly Dictionary<string, LedgerAccountState> _state = new(StringComparer.Ordinal);
     private readonly List<LedgerBlock> _blocks = new();
     private readonly List<LedgerTransaction> _mempool = new();
+    /// <summary>交易哈希 → 所在块高（<c>getTx</c> 不再全链扫描——与 append 同步维护，重放时建、出块时加）。</summary>
+    private readonly Dictionary<string, ulong> _txIndex = new(StringComparer.Ordinal);
+    /// <summary>mempool 交易被出块剔除的连续次数（瞬态拒因如「其它待打包交易还没到账」下一块可能就成立——
+    /// 连续 <see cref="MaxRejections"/> 块仍被拒才剔出，避免误删仍有机会入块的交易）。</summary>
+    private readonly Dictionary<string, int> _rejectCounts = new(StringComparer.Ordinal);
+    private bool _appendFaulted;
+    private const int MaxMempool = 10_000;
+    private const int MaxRejections = 3;
     private LedgerGenesis? _genesis;
     private LedgerWallet? _producer;
     private TcpListener? _listener;
@@ -71,6 +79,9 @@ public sealed class LedgerNode : IDisposable
     /// <summary>当前高度（创世后 0；每块 +1）。</summary>
     public ulong Height => (ulong)_blocks.Count;
 
+    /// <summary>链文件落盘已失败——出块已停（只读服务；检查磁盘/权限后重启续链，重启不会丢已确认块）。</summary>
+    public bool IsAppendFaulted { get { lock (_gate) return _appendFaulted; } }
+
     /// <summary>实际监听端点（端口 0 = 内核临时分配后取回——测试回环用）。</summary>
     public IPEndPoint? LocalEndpoint => _listener?.LocalEndpoint as IPEndPoint;
 
@@ -79,7 +90,17 @@ public sealed class LedgerNode : IDisposable
     {
         if (File.Exists(_options.ChainFilePath))
         {
-            var (loadedGenesis, loadedBlocks) = LedgerChainFile.Read(_options.ChainFilePath);
+            var (loadedGenesis, loadedBlocks, validLength) = LedgerChainFile.ReadWithValidLength(_options.ChainFilePath);
+            // 末行截断（上次写入被中断）：丢弃半行并**把文件截到最后一个完整记录**——不截的话半行会留在
+            // 文件中间，下一次重启就成了无法容忍的中段损坏（那个块从未确认，重放丢弃即正确语义）。
+            var fileLength = new FileInfo(_options.ChainFilePath).Length;
+            if (validLength < fileLength)
+            {
+                Log($"⚠ 链文件末行不完整（{fileLength} → {validLength} 字节，上次写入被中断）——已截断修复，该块从未确认");
+                using var repair = new FileStream(_options.ChainFilePath, FileMode.Open, FileAccess.Write, FileShare.Read);
+                repair.SetLength(validLength);
+                repair.Flush(flushToDisk: true);
+            }
             _genesis = loadedGenesis;
             _blocks.Clear();
             _blocks.AddRange(loadedBlocks);
@@ -88,6 +109,10 @@ public sealed class LedgerNode : IDisposable
                 throw new InvalidDataException($"链文件验证失败（拒绝启动在坏链上）：{result.Error}");
             foreach (var (address, account) in result.Accounts)
                 _state[address] = account;
+            _txIndex.Clear();
+            foreach (var block in _blocks)
+                foreach (var tx in block.Transactions)
+                    _txIndex[tx.Hash] = block.Height;
             Log($"链已加载：创世 {_genesis.Hash[..16]}… | 高度 {Height} | 交易 {result.TransactionsProcessed} 笔 | 账户 {_state.Count} 个（全量重放恢复）");
         }
         else
@@ -202,10 +227,19 @@ public sealed class LedgerNode : IDisposable
                     lock (_gate)
                     {
                         error = LedgerValidator.ValidateTransaction(tx, _genesis!, _state);
+                        // 内存池上限（背压）：满了就明确拒收，好过无界增长把节点拖垮；同 nonce 替换不算新占位。
+                        if (error is null && _mempool.Count >= MaxMempool
+                            && !_mempool.Any(m => m.From == tx.From && m.Nonce == tx.Nonce))
+                            error = $"内存池已满（{MaxMempool} 笔待打包）——稍后重试";
                         if (error is null)
                         {
                             // mempool 防重：同 nonce 只留最新（旧的是同笔重发或被顶掉的乱序）
-                            _mempool.RemoveAll(m => m.From == tx.From && m.Nonce == tx.Nonce);
+                            _mempool.RemoveAll(m =>
+                            {
+                                if (m.From != tx.From || m.Nonce != tx.Nonce) return false;
+                                _rejectCounts.Remove(m.Hash);
+                                return true;
+                            });
                             _mempool.Add(tx);
                         }
                     }
@@ -246,10 +280,9 @@ public sealed class LedgerNode : IDisposable
 
     private (LedgerTransaction?, LedgerBlock?) FindTransaction(string hash)
     {
-        foreach (var block in _blocks)
-            foreach (var tx in block.Transactions)
-                if (tx.Hash == hash) return (tx, block);
-        return (null, null);
+        if (!_txIndex.TryGetValue(hash, out var height)) return (null, null);
+        var block = _blocks[(int)height - 1];
+        return (block.Transactions.FirstOrDefault(t => t.Hash == hash), block);
     }
 
     // —— 出块循环：有交易即出 + 间隔心跳空块 ——
@@ -280,7 +313,14 @@ public sealed class LedgerNode : IDisposable
 
             lock (_gate)
             {
-                // 提交：状态推进 + 块登记 + mempool 清空 + 追加落盘（每块一行——链文件永远是最真相）
+                // 提交顺序：**先落盘再推进内存**——链文件是唯一真相。落盘成功而进程此刻崩，重启重放即得同一状态；
+                // 反之若先改内存再落盘，落盘失败就会出现「内存有块、文件没有」的静默丢块。
+                if (!AppendBlockToFile(block))
+                {
+                    _appendFaulted = true;
+                    Log("✗ 链文件追加失败——停止出块（内存态未前进，重启不会丢此块；检查磁盘/权限后重启续链）");
+                    break;
+                }
                 foreach (var tx in block.Transactions)
                 {
                     _state[tx.From] = _state[tx.From].Debit(tx.Asset, tx.AmountAtoms);
@@ -289,10 +329,28 @@ public sealed class LedgerNode : IDisposable
                         : new LedgerAccountState(0, 0, 0).Credit(tx.Asset, tx.AmountAtoms);
                 }
                 _blocks.Add(block);
+                foreach (var tx in block.Transactions)
+                {
+                    _txIndex[tx.Hash] = block.Height;
+                    _rejectCounts.Remove(tx.Hash);
+                }
                 _mempool.RemoveAll(m => block.Transactions.Any(t => t.Hash == m.Hash));
-                AppendBlockToFile(block);
+                // 被剔除的交易：瞬态拒因（如「另一笔待打包交易还没到账」）下一块可能成立——连续 MaxRejections 块才剔出
                 foreach (var (tx, reason) in rejected)
-                    Log($"内存池交易被出块剔除（不应发生——入池已验证）：from={tx.From[..12]}… {reason}");
+                {
+                    var n = _rejectCounts.TryGetValue(tx.Hash, out var c) ? c + 1 : 1;
+                    _rejectCounts[tx.Hash] = n;
+                    if (n >= MaxRejections)
+                    {
+                        _mempool.RemoveAll(m => m.Hash == tx.Hash);
+                        _rejectCounts.Remove(tx.Hash);
+                        Log($"内存池交易剔出（连续 {n} 块被拒）：from={tx.From[..12]}… nonce={tx.Nonce} {reason}");
+                    }
+                    else
+                    {
+                        Log($"内存池交易被本块跳过（第 {n}/{MaxRejections} 次）：from={tx.From[..12]}… nonce={tx.Nonce} {reason}");
+                    }
+                }
             }
             lastBlockAt = Environment.TickCount64;
             if (block.Transactions.Count > 0)
@@ -300,17 +358,30 @@ public sealed class LedgerNode : IDisposable
         }
     }
 
-    /// <summary>逐块 append（链文件格式 = JSON lines——重启恢复 = 读取+重放，天然增量）。</summary>
-    private void AppendBlockToFile(LedgerBlock block)
+    /// <summary>
+    /// 逐块 append（链文件格式 = JSON lines——重启恢复 = 读取+重放，天然增量）。
+    /// <para>写完必须 <c>Flush(flushToDisk: true)</c>（POSIX fsync / Windows FlushFileBuffers）：不 fsync 时
+    /// 数据只在页缓存里，掉电/硬重启会丢最后若干块（甚至留下半行——恢复端已按「跳过空白行 + 末行截断即弃」
+    /// 处理）。返回 false = 落盘失败，调用方须停止出块（见 <see cref="BlockLoopAsync"/>）。</para>
+    /// </summary>
+    private bool AppendBlockToFile(LedgerBlock block)
     {
+        var line = JsonSerializer.Serialize(block, new JsonSerializerOptions()) + Environment.NewLine;
         try
         {
-            using var writer = new StreamWriter(_options.ChainFilePath, append: true);
-            writer.WriteLine(JsonSerializer.Serialize(block, new JsonSerializerOptions()));
+            using var stream = new FileStream(
+                _options.ChainFilePath, FileMode.Append, FileAccess.Write, FileShare.Read,
+                bufferSize: 4096, FileOptions.None);
+            // UTF8 无 BOM：append 到已有文件时 BOM 会插在块中间（首行创世已由 LedgerChainFile.Write 写成无 BOM）
+            using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false), 4096, leaveOpen: true))
+                writer.Write(line);
+            stream.Flush(flushToDisk: true);
+            return true;
         }
         catch (Exception ex)
         {
-            Log($"⚠ 链文件追加失败（内存态继续——但重启将丢此块）：{ex.Message}");
+            Log($"✗ 链文件追加失败：{ex.Message}");
+            return false;
         }
     }
 
