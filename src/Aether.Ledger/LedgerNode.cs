@@ -63,6 +63,7 @@ public sealed class LedgerNode : IDisposable
     private LedgerGenesis? _genesis;
     private LedgerWallet? _producer;
     private TcpListener? _listener;
+    private long _acceptedConnections;
     private Task? _acceptLoop;
     private Task? _blockLoop;
     private readonly CancellationTokenSource _cts = new();
@@ -84,6 +85,9 @@ public sealed class LedgerNode : IDisposable
 
     /// <summary>实际监听端点（端口 0 = 内核临时分配后取回——测试回环用）。</summary>
     public IPEndPoint? LocalEndpoint => _listener?.LocalEndpoint as IPEndPoint;
+
+    /// <summary>累计接受的 TCP 连接数（运维面/回归测试：客户端应长连接复用，一次启动只看到个位数连接）。</summary>
+    public long AcceptedConnections => Interlocked.Read(ref _acceptedConnections);
 
     /// <summary>初始化：加载或生成链 + 恢复状态 + 启动监听与出块循环。</summary>
     public void Start()
@@ -169,6 +173,7 @@ public sealed class LedgerNode : IDisposable
             TcpClient client;
             try { client = await _listener!.AcceptTcpClientAsync(ct); }
             catch { break; }
+            Interlocked.Increment(ref _acceptedConnections);
             _ = Task.Run(() => ServeConnectionAsync(client, ct), ct);
         }
     }

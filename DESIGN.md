@@ -64,6 +64,7 @@ dotnet test  aether-ledger.slnx -c Release --no-build
 | 告警修复① | treasury 种子可能 null | `?? throw InvalidOperationException($"...种子：{logFile}")` | NodeTests diff；带日志路径 |
 | 告警修复② | 未使用 `_sim` + 空 `Dispose`/`IDisposable` | 删除，各测试 `using var sim` | 同上 |
 | NU1507 | 基线曾出现 | 重新还原后消失 | 旧 obj 缓存；assets `logs` 空，非配置缺陷 |
+| 客户端连接模型（线上事故） | 每次 RPC 新建 `TcpClient`（一调用一连接） | 长连接复用 + 断链重连一次（`LedgerClient`） | 服务器 2026-10-24：链高 21,190，桥启动全量重扫 = 2.1 万次握手，`TIME_WAIT` 打满 Windows 默认 16,384 个动态端口 ⇒ `SocketException 10048` ⇒ 交易所崩溃 ⇒ 服务 5 秒后重启再重扫，永久起不来（日志每 7 秒一条「桥启动」、从无「链重扫完成」）。回归：`客户端长连接_连续200次调用只握手一次`、`业务错误不断链_同一连接继续可用` |
 
 ## 6. 待升级项
 
@@ -73,7 +74,7 @@ dotnet test  aether-ledger.slnx -c Release --no-build
 | 2 | P1 | 重启恢复测试名不副实 | 只调 `VerifyFile`，未二次启动（`LedgerNodeTests.cs:133-155`） | 保留链文件，用 producer 种子起第二节点 | 测试变慢；夹具需改 |
 | 3 | P2 | mempool 被拒交易不移除 | 只按接受 hash 清理，rejected 仅日志（`LedgerNode.cs:292-295`） | 移出或标记失败；加上限 | 防误删同 nonce 替换 |
 | 4 | P2 | 无 state root/交易索引 | `txRoot`=哈希拼接；`getTx` 全链扫描（`LedgerNode.cs:247-253`） | 加高度→交易哈希索引，后加 state root | 索引需与 append 同步 |
-| 5 | P2 | 桥状态与轮询 | IOU 全内存、启动全量重扫；500ms 无退避（`LedgerBridge.cs:75-92,166-185`） | checkpoint；指数退避与健康指标 | checkpoint 有第二真相风险 |
+| 5 | P2 | 桥状态与轮询 | IOU 全内存、启动全量重扫（连接已改长连接复用，2 万块只握手一次；每 2000 块打进度）；500ms 无退避（`LedgerBridge.cs`） | checkpoint；指数退避与健康指标 | checkpoint 有第二真相风险（故本轮**不做**断点，只把重扫成本压到可接受） |
 | 6 | P2 | 桥/跨域测试缺位 | csproj 注释与 `MIGRATION` §7：Bridge 测试留 monorepo | apps 建集成测试：归账/钩子/重扫 | 需临时链，跨仓维护 |
 | 7 | P3 | 远程导出/分页缺失 | `exportChain` 只回本地 path；`getBlock` 单高度（`LedgerNode.cs:234-235`） | 范围导出/分页与流式 | 协议扩展；需限流 |
 | 8 | P3 | 单出块人无外部共识 | README/runbook 明示可审查、可重写 | 多签或 checkpoint 锚定 | 复杂度高 |

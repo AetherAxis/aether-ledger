@@ -70,18 +70,22 @@ public sealed class LedgerBridge : IDisposable
 
     /// <summary>
     /// 启动：全量重扫链（重建 AQ IOU 状态 + custody nonce）+ 启动轮询。
-    /// 链是唯一真相——桥的内存态重启后从这里恢复。
+    /// 链是唯一真相——桥的内存态重启后从这里恢复（因此不做重扫断点：宁可慢一点，也不让「链是唯一真相」失效）。
     /// </summary>
     public async Task StartAsync(CancellationToken ct = default)
     {
         var info = await _client.GetInfoAsync(ct);
         _log($"桥启动：链创世 {info.GenesisHash[..12]}… | 当前高度 {info.Height} | custody {CustodyAddress.Hex[..12]}…");
 
-        // 全量重扫：逐块处理，重建 AQ IOU + custody nonce（coin 历史出金也推进 nonce——单流）
+        // 全量重扫：逐块处理，重建 AQ IOU + custody nonce（coin 历史出金也推进 nonce——单流）。
+        // 每块一次 RPC；客户端是长连接（LedgerClient 复用同一条 TCP），链高两万级也只握手一次。
+        // 进度每 2000 块打一条——重扫期间长时间无输出会让人误判「卡死」（2026-10-24 现场踩过）。
         for (ulong h = 1; h <= info.Height; h++)
         {
             var block = await _client.GetBlockAsync(h, ct);
             ProcessBlock(block);
+            if (h % 2000 == 0 && h < info.Height)
+                _log($"链重扫进度：{h}/{info.Height} | 计价币 IOU {_quoteBalances.Count} 个");
         }
         _scannedHeight = info.Height;
         _log($"链重扫完成：高度 {info.Height} | 计价币 IOU {_quoteBalances.Count} 个 | custody 出金 nonce={_custodyNonce}");

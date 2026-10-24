@@ -55,6 +55,9 @@ internal sealed class LedgerNodeLoopback : IDisposable
     /// <summary>节点已判定链文件落盘失败并停止出块。</summary>
     public bool IsAppendFaulted => _node.IsAppendFaulted;
 
+    /// <summary>节点累计接受的 TCP 连接数（断言客户端长连接复用）。</summary>
+    public long AcceptedConnections => _node.AcceptedConnections;
+
     /// <summary>在**已有**链文件上起节点 = 生产重启路径：producer 种子经 <c>AETHER_LEDGER_PRODUCER_SEED</c> 提供
     /// （env 是跨进程通道，这里同步设置/复位——Start() 在返回前同步完成，不留窗口）。
     /// 不解析种子日志（已有链不再打印种子），<see cref="TreasurySeed"/> 为空是预期的。</summary>
@@ -153,6 +156,33 @@ public class LedgerNodeTests
         var (height, found) = await sim.Client.GetTxAsync(tx.Hash);
         Assert.Equal(1UL, height);
         Assert.Equal("节点转账测试", found.Memo);
+    }
+
+    [Fact]
+    public async Task 客户端长连接_连续200次调用只握手一次()
+    {
+        using var sim = await NewSimAsync("reuse");
+        for (var i = 0; i < 200; i++)
+            Assert.Equal(77U, (await sim.Client.GetInfoAsync()).ChainId);
+
+        // 连接数 = 1：每调用新建 TcpClient 的旧实现这里是 200（桥全量重扫 2 万块 = 2 万次握手 + 2 万 TIME_WAIT，
+        // Windows 默认 16384 个动态端口被打光 ⇒ SocketException 10048 ⇒ 交易所崩溃重启循环）
+        Assert.Equal(1L, sim.AcceptedConnections);
+    }
+
+    [Fact]
+    public async Task 业务错误不断链_同一连接继续可用()
+    {
+        using var sim = await NewSimAsync("err-keep");
+        var treasury = new LedgerWallet(Convert.FromHexString(sim.TreasurySeed));
+        var alice = LedgerHarness.Wallet("node-err-keep");
+        var bad = LedgerTransaction.Sign(77, treasury, alice.Address, 1UL, 2);   // nonce 跳号
+
+        await Assert.ThrowsAsync<LedgerClientException>(() => sim.Client.SubmitTxAsync(bad));
+        Assert.Equal(77U, (await sim.Client.GetInfoAsync()).ChainId);
+
+        // 拒因是节点正常应答（err 帧），不是连接失败——不该触发重连
+        Assert.Equal(1L, sim.AcceptedConnections);
     }
 
     [Fact]

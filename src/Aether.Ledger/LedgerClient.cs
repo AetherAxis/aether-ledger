@@ -5,14 +5,25 @@ using System.Text.Json;
 namespace Aether.Ledger;
 
 /// <summary>
-/// 链节点 RPC 客户端（引擎库内——批 3 交易所桥与测试共用）。一行请求一行应答（与节点协议同款；
-/// 每调用一连接（getBalance/submitTx 的调用频率是秒级——连接开销可忽略，换来零连接状态管理）。
+/// 链节点 RPC 客户端（引擎库内——批 3 交易所桥与测试共用）。一行请求一行应答（与节点协议同款）。
+/// <para>
+/// <b>长连接复用</b>（2026-10-24）：节点侧是「每连接一读循环串行分发」（<c>LedgerNode.ServeConnectionAsync</c>），
+/// 客户端却曾每调用新建 <see cref="TcpClient"/>。桥启动要全量重扫链（一个块一次 RPC），链高 2 万级时
+/// = 2 万次握手 + 2 万个 TIME_WAIT 端口，把 Windows 默认 16384 个动态端口打光 ⇒ <c>SocketException 10048</c>
+/// ⇒ 交易所崩溃 ⇒ 服务自动重启再重扫一遍，永久起不来（2026-10-24 服务器现场）。改为单连接串行（信号量互斥），
+/// 断链时丢弃旧连接重连一次。
+/// </para>
 /// <b>签名在调用方</b>（钱包在客户端侧）——本客户端只传输已签名交易，无私钥面。
 /// </summary>
 public sealed class LedgerClient : IDisposable
 {
     private readonly string _host;
     private readonly int _port;
+    private readonly SemaphoreSlim _gate = new(1, 1);
+
+    private TcpClient? _client;      // 长连接（null = 未连接/已断开）
+    private NetworkStream? _stream;
+    private byte[] _pending = [];    // 上一次读取超出一行末尾的余量（协议一行一应答，正常为空）
 
     public LedgerClient(string host, int port)
     {
@@ -65,31 +76,45 @@ public sealed class LedgerClient : IDisposable
             result.GetProperty("transaction").Deserialize<LedgerTransaction>(LedgerJson.Options)!);
     }
 
-    /// <summary>请求/应答核心（一连接一请求；err ⇒ 抛 LedgerClientException——错误串原样透传）。</summary>
+    /// <summary>请求/应答核心（长连接串行；断链重连一次；err ⇒ 抛 LedgerClientException——错误串原样透传）。</summary>
     private async Task<JsonElement> CallAsync(string op, object? arg, CancellationToken ct)
     {
-        using var client = new TcpClient();
-        await client.ConnectAsync(_host, _port, ct);
-        using var stream = client.GetStream();
+        await _gate.WaitAsync(ct);
+        try
+        {
+            try
+            {
+                return await CallOnceAsync(op, arg, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                // 半途取消 ⇒ 连接上可能残留半个应答，直接丢弃（下次重连）
+                DropConnection();
+                throw;
+            }
+            catch (Exception ex) when (ex is SocketException or IOException or ObjectDisposedException)
+            {
+                // 节点重启/连接被回收：丢掉旧连接，重连一次再试（业务错误 LedgerClientException 不在此列）
+                DropConnection();
+                return await CallOnceAsync(op, arg, ct);
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task<JsonElement> CallOnceAsync(string op, object? arg, CancellationToken ct)
+    {
+        var stream = await EnsureConnectedAsync(ct);
         var request = JsonSerializer.Serialize(new LedgerRpcRequest(op,
             arg is null ? null : JsonSerializer.SerializeToElement(arg, LedgerJson.Options)), LedgerJson.Options);
-        var bytes = Encoding.UTF8.GetBytes(request);
+        var bytes = Encoding.UTF8.GetBytes(request + "\n");
         await stream.WriteAsync(bytes, ct);
-        await stream.WriteAsync("\n"u8.ToArray(), ct);
         await stream.FlushAsync(ct);
 
-        // 读一行应答
-        var buf = new byte[64 * 1024];
-        var sb = new StringBuilder();
-        while (true)
-        {
-            var n = await stream.ReadAsync(buf, ct);
-            if (n == 0) break;
-            var chunk = Encoding.UTF8.GetString(buf, 0, n);
-            sb.Append(chunk);
-            if (chunk.Contains('\n')) break;
-        }
-        var response = JsonSerializer.Deserialize<LedgerRpcClientResponse>(sb.ToString(), LedgerJson.Options)
+        var response = JsonSerializer.Deserialize<LedgerRpcClientResponse>(await ReadLineAsync(stream, ct), LedgerJson.Options)
             ?? throw new LedgerClientException("应答反序列化为 null");
         if (!response.Ok)
             throw new LedgerClientException(response.Err ?? "(无错误信息)");
@@ -97,7 +122,56 @@ public sealed class LedgerClient : IDisposable
             : throw new LedgerClientException($"操作 {op} 无 result（ok=true 但空应答——协议错误）");
     }
 
-    public void Dispose() { /* 每调用一连接——无长驻资源 */ }
+    /// <summary>取长连接（没有就建；已建直接复用——一次启动 2 万次 RPC 只握手一次）。</summary>
+    private async Task<NetworkStream> EnsureConnectedAsync(CancellationToken ct)
+    {
+        if (_stream is not null)
+            return _stream;
+        var client = new TcpClient { NoDelay = true };
+        await client.ConnectAsync(_host, _port, ct);
+        _client = client;
+        _stream = client.GetStream();
+        _pending = [];
+        return _stream;
+    }
+
+    /// <summary>读一行应答（跨包拼接；超出的余量留给下一次——协议一行一应答，正常只会有 0 字节余量）。</summary>
+    private async Task<string> ReadLineAsync(NetworkStream stream, CancellationToken ct)
+    {
+        while (true)
+        {
+            var idx = Array.IndexOf(_pending, (byte)'\n');
+            if (idx >= 0)
+            {
+                var line = Encoding.UTF8.GetString(_pending, 0, idx);
+                _pending = _pending[(idx + 1)..];
+                return line;
+            }
+            var buf = new byte[64 * 1024];
+            var n = await stream.ReadAsync(buf, ct);
+            if (n == 0)
+                throw new IOException("链节点关闭了连接（应答未读完）");
+            var merged = new byte[_pending.Length + n];
+            Buffer.BlockCopy(_pending, 0, merged, 0, _pending.Length);
+            Buffer.BlockCopy(buf, 0, merged, _pending.Length, n);
+            _pending = merged;
+        }
+    }
+
+    private void DropConnection()
+    {
+        try { _stream?.Dispose(); } catch { }
+        try { _client?.Dispose(); } catch { }
+        _stream = null;
+        _client = null;
+        _pending = [];
+    }
+
+    public void Dispose()
+    {
+        DropConnection();
+        _gate.Dispose();
+    }
 }
 
 /// <summary>节点信息快照。</summary>
