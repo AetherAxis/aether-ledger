@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace Aether.Ledger;
 
 /// <summary>
-/// 提币前置钩子（venue 接线——交易所宿主的 <c>LedgerSpotLink</c> 实现）：桥签名出金<b>之前</b>先扣减
+/// 提币前置钩子（venue 接线——交易所宿主的 <c>LedgerCashRail</c> 实现）：桥签名出金<b>之前</b>先扣减
 /// venue 侧资产。返回 <c>(false, 原因)</c> = venue 侧不足/币通道已退役 ⇒ 拒提（IOU 不动、不签名）。
 /// 扣减成功但链上提交失败的崩溃窗口由「链是唯一真相」重扫自愈（AQ IOU 从链上重扫推导）。
 /// <para><b>2026-10-10 币通道退役</b>：桥只处理计价币（AQ）——coin 的充提通道整体拆除
