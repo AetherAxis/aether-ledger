@@ -30,8 +30,10 @@ dotnet test aether-ledger.slnx
 ## 本仓库的来历
 
 2026-10-19 从 Aether monorepo（`~/Desktop/Aether`）抽取为第一个独立仓库试点。
-**边界**：`LedgerWallet` CLI（依赖交易所 RPC 客户端）与桥/对账/提现的跨域集成测试**留在 monorepo**——
-等交易所 SDK 独立成包后迁入。抽取时的完整决策记录见工作区根 `MIGRATION.md`。
+**边界**：`LedgerWallet` CLI（依赖交易所 RPC 客户端）**已迁 ⑧ aether-apps**（2026-10-27，
+`../aether-apps/Aether.Ledger.Wallet`，引本仓 `Aether.Ledger` + ④ `Aether.Exchange.Rpc`）；桥/对账/提现的跨域
+集成测试仍留 monorepo。同时 `deploy-ledger` 部署链改由 ⑧ 构建（源 = ⑧ 宿主 + 本仓）——**本仓的改动从此
+能真正到达服务器上的 :17805**。抽取时的完整决策记录见工作区根 `MIGRATION.md`。
 
 ## 运行
 
