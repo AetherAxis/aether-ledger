@@ -7,7 +7,7 @@
 
 | 项目 | 说明 |
 |---|---|
-| `src/Aether.Ledger` | 链引擎纯库：账户/转账签名/区块/五条验证规则/创世供给/JSON-lines 链文件/节点（TCP JSON-RPC + 内存池 + 出块循环）/桥（交易所托管服务）。唯一依赖 `NSec.Cryptography`（Ed25519 确定性签名） |
+| `src/Aether.Ledger` | 链引擎纯库：账户/转账签名/区块/五条验证规则/创世供给/JSON-lines 链文件/节点（TCP JSON-RPC + 内存池 + 出块循环）/桥（交易所托管服务）。唯一 NuGet 依赖 `BouncyCastle.Cryptography`（**纯托管** Ed25519 确定性签名——2026-10-27 从 NSec/libsodium 换过来，签名字节不变，见 `LedgerEd25519ParityTests`；换的原因：libsodium 的 iOS 切片缺 NSec 需要的符号，导致移动端无法链接） |
 | `tests/Aether.Ledger.Tests` | 纯链测试（引擎规则 + 节点回环 + 重启恢复/末行截断自愈/落盘失败停写），24 例 |
 | `doc/ledger-runbook.md` | 运维手册（部署/验证/备份种子/发币/充值/交易/提币） |
 

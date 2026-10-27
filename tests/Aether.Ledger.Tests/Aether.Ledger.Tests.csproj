@@ -7,6 +7,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- 只在这里引 NSec：作为「换库后签名字节逐字节不变」的对照实现（生产代码已无原生依赖）。 -->
+    <PackageReference Include="NSec.Cryptography" />
     <PackageReference Include="coverlet.collector" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />

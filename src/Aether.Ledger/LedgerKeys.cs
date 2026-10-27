@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
+using Org.BouncyCastle.Math.EC.Rfc8032;
 
 namespace Aether.Ledger;
 
@@ -53,8 +54,10 @@ public readonly record struct LedgerAddress
 
 /// <summary>
 /// 钱包密钥：**32 字节种子 = 全部财富与身份**（Ed25519 从种子确定性派生——同种子恒同密钥，
-/// 备份 = 备份 32 字节）。刻意的胶水层：NSec 的 Key 类型不进公开 API（链类型零 NSec 泄漏，
+/// 备份 = 备份 32 字节）。刻意的胶水层：签名库类型不进公开 API（链类型零第三方类型泄漏，
 /// 序列化/验证只碰 byte[]）。
+/// <para>Ed25519 = RFC 8032 确定性签名，纯托管实现（BouncyCastle）——不依赖 libsodium 原生库，
+/// 因此桌面 / Android / iOS / 服务器同一份代码、签名字节完全一致（历史链数据与验签零迁移）。</para>
 /// </summary>
 public sealed class LedgerWallet
 {
@@ -67,17 +70,15 @@ public sealed class LedgerWallet
     /// <summary>派生地址（SHA256(pubkey)[0..20]）。</summary>
     public LedgerAddress Address { get; }
 
-    private readonly NSec.Cryptography.Key _key;
-
     /// <summary>从 32 字节种子恢复钱包（同种子恒同钱包——确定性派生）。</summary>
     public LedgerWallet(ReadOnlySpan<byte> seed)
     {
         if (seed.Length != 32)
             throw new ArgumentException($"种子须 32 字节，实际 {seed.Length}。");
         Seed = seed.ToArray();
-        _key = NSec.Cryptography.Key.Import(
-            NSec.Cryptography.SignatureAlgorithm.Ed25519, Seed, NSec.Cryptography.KeyBlobFormat.RawPrivateKey);
-        PublicKey = _key.PublicKey.Export(NSec.Cryptography.KeyBlobFormat.RawPublicKey);
+        var publicKey = new byte[32];
+        Ed25519.GeneratePublicKey(Seed, 0, publicKey, 0);
+        PublicKey = publicKey;
         Address = LedgerAddress.FromPublicKey(PublicKey);
     }
 
@@ -91,7 +92,12 @@ public sealed class LedgerWallet
 
     /// <summary>签名任意字节（交易载荷签名用；Ed25519 自带哈希——直接签原文）。</summary>
     public byte[] Sign(ReadOnlySpan<byte> payload)
-        => NSec.Cryptography.SignatureAlgorithm.Ed25519.Sign(_key, payload.ToArray());
+    {
+        var message = payload.ToArray();
+        var signature = new byte[64];
+        Ed25519.Sign(Seed, 0, message, 0, message.Length, signature, 0);
+        return signature;
+    }
 }
 
 /// <summary>验签静态入口（验证器用——只需公钥，不需钱包）。</summary>
@@ -101,9 +107,16 @@ public static class LedgerSignature
     public static bool Verify(ReadOnlySpan<byte> publicKey, ReadOnlySpan<byte> payload, ReadOnlySpan<byte> signature)
     {
         if (publicKey.Length != 32 || signature.Length != 64) return false;
-        var alg = NSec.Cryptography.SignatureAlgorithm.Ed25519;
-        var pub = NSec.Cryptography.PublicKey.Import(alg, publicKey.ToArray(), NSec.Cryptography.KeyBlobFormat.RawPublicKey);
-        return alg.Verify(pub, payload.ToArray(), signature.ToArray());
+        var message = payload.ToArray();
+        try
+        {
+            return Ed25519.Verify(signature.ToArray(), 0, publicKey.ToArray(), 0, message, 0, message.Length);
+        }
+        catch
+        {
+            // 畸形签名/公钥（非曲线点等）由实现抛异常——验签的语义是「这签名不成立」，不是崩溃。
+            return false;
+        }
     }
 }
 

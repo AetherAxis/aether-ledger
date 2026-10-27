@@ -12,7 +12,7 @@
 
 | 项目 | 职责 | 关键类型 | 出向依赖 |
 |---|---|---|---|
-| `src/Aether.Ledger` | 纯库：账户/签名、交易/区块、创世供给、五条规则、链文件、节点 RPC、桥 | `Address/Wallet/Signature/Codec`、`Transaction`、`Genesis/Block`、`AccountState/BlockBuilder/ChainFile`、`Validator`、`Node/Client`、`Bridge` | 仅 `NSec.Cryptography` 26.4.0，零 ProjectReference |
+| `src/Aether.Ledger` | 纯库：账户/签名、交易/区块、创世供给、五条规则、链文件、节点 RPC、桥 | `Address/Wallet/Signature/Codec`、`Transaction`、`Genesis/Block`、`AccountState/BlockBuilder/ChainFile`、`Validator`、`Node/Client`、`Bridge` | 仅 `BouncyCastle.Cryptography` 2.7.0（纯托管 Ed25519；与旧 NSec 签名逐字节一致，回归见 `LedgerEd25519ParityTests`），零 ProjectReference |
 | `tests/Aether.Ledger.Tests` | 纯链测试 22 例（17+5） | `LedgerEngineTests`、`LedgerNodeTests`、`LedgerHarness`、`LedgerNodeLoopback` | 引用引擎；xunit 2.9.3/Test.Sdk 18.11.0/runner 4.0.1/coverlet 10.1.0 |
 
 ## 3. 关键设计决策

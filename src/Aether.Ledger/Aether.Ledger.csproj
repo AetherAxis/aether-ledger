@@ -3,9 +3,11 @@
   <!-- 虚拟币链引擎（2026-10-05 批1，最小设计落地）：账户模型 + Ed25519 签名转账 + 哈希链区块 +
        五条验证规则 + 创世供给规则（treasury 拿满 21M）+ JSON-lines 链文件 + 独立验证器逻辑。
        纯库零 ProjectReference——「链 = 资产层」独立于交易所（venue 层）存活的根基：
-       链文件 + 验证器 = 不需要任何活进程的余额真相。签名库刻意选 NSec（Ed25519 确定性签名）。 -->
+       链文件 + 验证器 = 不需要任何活进程的余额真相。签名库用**纯托管** BouncyCastle 的 Ed25519（RFC 8032 确定性签名）：
+       NSec 走 libsodium 原生库，iOS 链接不过（2026-10-27 实测），换纯托管后签名字节不变、
+       且 Android/iOS/桌面/服务器同一份实现。 -->
   <ItemGroup>
-    <PackageReference Include="NSec.Cryptography" />
+    <PackageReference Include="BouncyCastle.Cryptography" />
   </ItemGroup>
 
   <PropertyGroup>

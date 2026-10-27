@@ -4,6 +4,11 @@
   </PropertyGroup>
   <ItemGroup>
     <!-- 从 Aether monorepo 根 CPM 抄出的独立版本面（2026-10-19 抽取时点） -->
+    <!-- 纯托管 Ed25519（RFC 8032）——原来的 NSec 走 libsodium 原生库：Android 有 natives 但
+         iOS 的 libsodium.a 缺 NSec 26.4 需要的 Aegis 符号且无模拟器切片（2026-10-27 链接失败实测）。
+         换成纯托管实现后签名字节不变（Ed25519 是确定性签名，见 LedgerEd25519ParityTests 回归）。 -->
+    <PackageVersion Include="BouncyCastle.Cryptography" Version="2.7.0" />
+    <!-- NSec 只剩测试侧用：作为「与历史签名逐字节一致」的对照实现（生产代码不再引用）。 -->
     <PackageVersion Include="NSec.Cryptography" Version="26.4.0" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.13" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.13" />
