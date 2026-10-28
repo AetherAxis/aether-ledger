@@ -11,7 +11,7 @@
 | `tests/Aether.Ledger.Tests` | 纯链测试（引擎规则 + 节点回环 + 重启恢复/末行截断自愈/落盘失败停写），24 例 |
 | `doc/ledger-runbook.md` | 运维手册（部署/验证/备份种子/发币/充值/交易/提币） |
 
-节点/验证器宿主（原 `apps/LedgerNode`、`apps/LedgerVerify`）已移至 aether-apps 仓（组合根归一，2026-10-20）。
+节点/验证器宿主（原 `apps/LedgerNode`、`apps/LedgerVerify`）已移至 aether-ctp-hosts 仓（组合根归一，2026-10-20）。
 
 ## 核心设计
 

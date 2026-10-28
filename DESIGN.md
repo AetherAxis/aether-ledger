@@ -6,7 +6,7 @@
 
 `aether-ledger` 是链资产层：原生代币账本 + 节点 RPC + 交易所托管桥，只回答余额归属与转账合法性；交易所可停摆，链文件与验证器仍是余额真相。
 
-本仓只保留引擎纯库、纯链测试与运维手册；宿主、CLI、部署脚本及桥/跨域测试按 `MIGRATION.md` 留在 `aether-apps`/monorepo，不引用交易所、桌面、AI。
+本仓只保留引擎纯库、纯链测试与运维手册；宿主、CLI、部署脚本及桥/跨域测试按 `MIGRATION.md` 留在 `aether-ctp-hosts`/monorepo，不引用交易所、桌面、AI。
 
 ## 2. 项目组成
 
