@@ -49,7 +49,7 @@ dotnet build aether-ledger.slnx -c Release
 dotnet test  aether-ledger.slnx -c Release --no-build
 ```
 
-节点在 `../aether-coin/Aether.Ledger.Node`（⑯）（默认 `127.0.0.1:17805` / `~/.aether/ledger.chain`）；env 为 `AETHER_LEDGER_ADDR/CHAIN_FILE/CHAIN_ID/BLOCK_INTERVAL_SEC`，已有链须设 `PRODUCER_SEED`。验证器 `Aether.Ledger.Verify <链文件>`，0=有效/2=无效。RPC：`getInfo/getBalance/submitTx/getBlock/getTx/exportChain`，一行一答、无推送。CI：ubuntu + dotnet 10.0.x，注入 GitHub Packages 凭据后 Release build/test。本次仅静态核对，未跑 build/test；22 例与 10-23 的 22/22 见 `README/MIGRATION`。
+节点在 `../aether-coin-hosts/Aether.Ledger.Node`（⑯）（默认 `127.0.0.1:17805` / `~/.aether/ledger.chain`）；env 为 `AETHER_LEDGER_ADDR/CHAIN_FILE/CHAIN_ID/BLOCK_INTERVAL_SEC`，已有链须设 `PRODUCER_SEED`。验证器 `Aether.Ledger.Verify <链文件>`，0=有效/2=无效。RPC：`getInfo/getBalance/submitTx/getBlock/getTx/exportChain`，一行一答、无推送。CI：ubuntu + dotnet 10.0.x，注入 GitHub Packages 凭据后 Release build/test。本次仅静态核对，未跑 build/test；22 例与 10-23 的 22/22 见 `README/MIGRATION`。
 
 ## 5. 升级记录（2026-10-24）
 

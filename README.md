@@ -30,22 +30,23 @@ dotnet test aether-ledger.slnx
 ## 本仓库的来历
 
 2026-10-19 从 Aether monorepo（`~/Desktop/Aether`）抽取为第一个独立仓库试点。
-**边界**：三个可执行宿主（节点 / 钱包 CLI / 独立验证器）都在 ⑯ `aether-coin`
-（`../aether-coin/Aether.Ledger.*`，2026-10-27 从 ⑧ 拆出）；钱包 CLI 另引 ④ `Aether.Exchange.Rpc` 做提现。
+**边界**：三个可执行宿主（节点 / 钱包 CLI / 独立验证器）都在 ⑯ `aether-coin-hosts`
+（`../aether-coin-hosts/Aether.Ledger.*`，2026-10-27 从 ⑧ 拆出）；钱包 CLI 另引 ④ `Aether.Exchange.Rpc` 做提现；
+钱包 GUI 在 ⑰ `aether-coin-desktop`（2026-10-28 拆出）。
 `deploy-ledger` 也随宿主住 ⑯（源 = ⑯ 宿主 + 本仓）——**本仓的改动改由 ⑯ 的 workflow 送达服务器上的 :17805**。
 桥/对账/提现的跨域胶水（`LedgerCashRail`）留在 ⑧ 的交易所宿主。抽取时的完整决策记录见工作区根 `MIGRATION.md`。
 
 ## 运行
 
-可执行宿主（`Aether.Ledger.Node` 节点 / `Aether.Ledger.Verify` 独立验证器）在 ⑯ `aether-coin`
-（2026-10-20 曾归一进 ⑧ 组合根，2026-10-27 随虚拟币线拆出；工作区同级 `../aether-coin/`）：
+可执行宿主（`Aether.Ledger.Node` 节点 / `Aether.Ledger.Verify` 独立验证器）在 ⑯ `aether-coin-hosts`
+（2026-10-20 曾归一进 ⑧ 组合根，2026-10-27 随虚拟币线拆出；工作区同级 `../aether-coin-hosts/`）：
 
 ```bash
 # 节点（默认 127.0.0.1:17805，链文件 ~/.aether/ledger.chain）
-dotnet run --project ../aether-coin/Aether.Ledger.Node
+dotnet run --project ../aether-coin-hosts/Aether.Ledger.Node
 
 # 独立验证（退出码 0=有效 / 2=无效）
-dotnet run --project ../aether-coin/Aether.Ledger.Verify -- <链文件路径>
+dotnet run --project ../aether-coin-hosts/Aether.Ledger.Verify -- <链文件路径>
 
 # 新链生成时 treasury/producer 种子打印进 node 日志——务必抄录（丢失 = 丢失链）
 ```
